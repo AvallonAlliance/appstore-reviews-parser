@@ -3,6 +3,7 @@ from gevent import monkey
 monkey.patch_all(httplib=False)
 
 import os
+import gc
 import unicodecsv
 import argparse
 import json
@@ -13,70 +14,72 @@ import itunes_parser
 
 DEFAULT_STORE = itunes_parser.STORES['United States']
 
+ALL_PAGES = -1
 
-def get_reviews(app_id, store_id=DEFAULT_STORE,
-                review_pages=-1, pool_size=100):
+
+def requests_iterator(requests, pool_size=200):
+    i = 0
+    i_last = len(requests) - 1
     pool = Pool(pool_size)
-    first_page_content = pool.map(download, [(_get_reviews_url(app_id), store_id)])[0]
-    pages_count = itunes_parser.parse_reviews_page_count(first_page_content)
-    if review_pages > 0 and pages_count > review_pages:
-        pages_count = review_pages
+    while i < i_last:
+        print i
+        responses = pool.map(download, requests[i:i + pool_size])
+        for response in responses:
+            yield response
+        i += pool_size
+        gc.collect()
+
+
+def get_reviews_page_count(app_id, store_id):
+    first_page_content = download((_get_reviews_url(app_id), store_id))
+    return itunes_parser.parse_reviews_page_count(first_page_content)
+
+
+def get_reviews(app_id, store_id=DEFAULT_STORE, review_pages=ALL_PAGES, pool_size=100):
+    reviews_page_count = get_reviews_page_count(app_id, store_id)
+    if review_pages != ALL_PAGES and reviews_page_count > review_pages:
+        reviews_page_count = review_pages
+
     page_requests = []
-    for i in range(pages_count):
-        if i == 0:
-            continue
+    for i in range(reviews_page_count):
         page_requests.append((_get_reviews_url(app_id, i), store_id))
-    page_responses = pool.map(download, page_requests)
-    page_responses = [first_page_content] + page_responses
+
     reviews = []
-    for page in page_responses:
-        reviews += itunes_parser.parse_reviews(page)
+    for response in requests_iterator(page_requests, pool_size):
+        reviews += json.loads(itunes_parser.parse_reviews(response))
+
     return reviews
 
 
-def get_user_reviews_summary(app_id, review_pages=-1, rank_in_filter=None,
-                             rank_out_filter=None, store_id=DEFAULT_STORE,
-                             pool_size=100):
-    print 'Get reviews'
-    reviews = get_reviews(app_id, store_id, review_pages)
+def get_user_reviews_summary(app_id, review_pages=-1, filter_rank_in=None, filter_rank_out=None, store_id=DEFAULT_STORE, pool_size=100):
+    print 'Fetching reviews...'
+    reviews = get_reviews(app_id, store_id, review_pages, pool_size=pool_size)
     print 'Reviews count: %d' % len(reviews)
 
     user_ids = set()
     for review in reviews:
         if 'user_id' not in review:
             continue
-        if rank_in_filter is not None:
-            if 'rank' in review and review['rank'] < rank_in_filter:
+        if filter_rank_in is not None:
+            if 'rank' in review and review['rank'] < filter_rank_in:
                 continue
         user_ids.add(review['user_id'])
-    reviews = None
 
-    print 'Get user reviews'
+    print 'Fetching user reviews...'
     page_requests = []
     for user_id in user_ids:
         request = (_get_user_reviews_url(user_id), store_id)
         page_requests.append(request)
 
     user_reviews = []
-    i_start = 0
-    i_end = pool_size
-    n = len(page_requests)
-    pool = Pool(pool_size)
-    while True:
-        if i_start >= n:
-            break
-        print i_start
-        responses = pool.map(download, page_requests[i_start:i_end])
-        for el in responses:
-            user_reviews += json.loads(itunes_parser.parse_user_reviews(el))
-        i_start += pool_size
-        i_end += pool_size
+    for response in requests_iterator(page_requests, pool_size):
+        user_reviews += json.loads(itunes_parser.parse_user_reviews(response))
     print 'User reviews count: %d' % len(user_reviews)
 
     user_reviews_summary = {}
     for review in user_reviews:
-        if rank_out_filter is not None:
-            if review['stars'] < rank_out_filter:
+        if filter_rank_in is not None:
+            if review['stars'] < filter_rank_out:
                 continue
         user_reviews_summary[review['game_title']] = user_reviews_summary.get(review['game_title'], 0) + 1
     user_reviews_summary = sorted(user_reviews_summary.items(), key=lambda x: x[1], reverse=True)
@@ -112,23 +115,31 @@ if __name__ == '__main__':
     m = argparse.ArgumentParser()
     m.add_argument('--app_id', '-a', type=int, help='iTunes app id')
     m.add_argument('--store_id', '-s', default=DEFAULT_STORE, type=int, help='iTunes app store id')
-    m.add_argument('--review_pages', '-p', default=25, type=int, help='Count of parsed review pages')
+    m.add_argument('--review_pages', '-p', default=ALL_PAGES, type=int, help='Count of parsed review pages')
+    m.add_argument('--pool', '-ps', default=200, type=int, help='Concurrent urls count')
+    m.add_argument('--rank_in', '-ri', default=None, type=int, help='Filter reviews by rating')
+    m.add_argument('--rank_out', '-ro', default=None, type=int, help='Filter user reviews by rating')
     m.add_argument('--out', '-o', default='', type=str, help='Count of parsed review pages')
-    m.add_argument('--pool', '-ps', default=100, type=int, help='Concurrent urls count')
     options = vars(m.parse_args())
     if options['app_id'] is None:
         print 'App id is required.'
         exit()
-    pool_size = options['pool']
-    if pool_size < 1:
-        pool_size = 1
-    if pool_size > 1000:
-        pool_size = 1000
+    rank_in = options['rank_in']
+    rank_out = options['rank_out']
+
+    ps = options['pool']
+    if ps < 1:
+        ps = 1
+    if ps > 1000:
+        ps = 1000
     result = get_user_reviews_summary(
         options['app_id'],
         review_pages=options['review_pages'],
         store_id=options['store_id'],
-        pool_size=pool_size)
+        pool_size=ps,
+        filter_rank_in=rank_in,
+        filter_rank_out=rank_out)
+
     fpath = os.path.join(options['out'], '%d.csv' % options['app_id'])
     f = open(fpath, 'wb')
     writer = unicodecsv.writer(f)

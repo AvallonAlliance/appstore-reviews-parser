@@ -159,6 +159,7 @@ def parse_reviews(page):
         except KeyError:
             pass
         reviews.append(review)
+    reviews = json.dumps(reviews)
     return reviews
 
 

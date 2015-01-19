@@ -1,5 +1,8 @@
 # -*- encoding: utf-8 -*-
 import re
+import gc
+import json
+
 from lxml import etree
 from BeautifulSoup import BeautifulSoup
 
@@ -121,6 +124,7 @@ def parse_reviews_page_count(page):
 
 
 def parse_reviews(page):
+    # print page
     page_xml = etree.fromstring(page)
     reviews = []
     review_nodes = findall(page_xml, 'View/ScrollView/VBoxView/View/MatrixView/'
@@ -162,26 +166,27 @@ def parse_user_reviews(page):
     page_html = BeautifulSoup(page)
     user_id = None
     try:
-        user_href = page_html.find('div', **{'class': 'lockup-container paginate'})
+        user_href = page_html.find('div', {'class': 'lockup-container paginate'})
         user_href = user_href['goto-page-href']
-        user_id = user_href.split('?')[1].split('&')[0].split('=')[1]
+        if user_href is not None:
+            user_id = user_href.split('?')[1].split('&')[0].split('=')[1]
     except KeyError:
         pass
     except IndexError:
         pass
-    review_nodes = page_html.findAll('div', **{'class': 'customer-review'})
+    review_nodes = page_html.findAll('div', {'class': 'customer-review'})
     reviews = []
     for review_node in review_nodes:
         try:
             game_title_block = review_node \
-                .find('div', **{'class': 'content-lockup'}) \
-                .find('li', **{'class': 'name'}) \
+                .find('div', {'class': 'content-lockup'}) \
+                .find('li', {'class': 'name'}) \
                 .find('a')
             game_url = game_title_block['href']
             game_title = game_title_block.string
             stars = review_node \
-                .find('div', **{'class': 'review-block'}) \
-                .findAll('span', **{'class': 'rating-star'})
+                .find('div', {'class': 'review-block'}) \
+                .findAll('span', {'class': 'rating-star'})
         except AttributeError:
             continue
         stars = len(stars)
@@ -191,4 +196,8 @@ def parse_user_reviews(page):
             'game_url': game_url,
             'stars': stars
         })
+    page_html = None
+    review_nodes = None
+    gc.collect()
+    reviews = json.dumps(reviews)
     return reviews
